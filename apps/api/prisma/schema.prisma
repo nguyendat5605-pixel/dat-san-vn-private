@@ -1,0 +1,401 @@
+// ============================================================
+// DatSanVN — Prisma Schema (v1.3)
+// Nền tảng đặt sân thể thao trực tuyến
+// ============================================================
+// Business Rules:
+// - Booking states: PENDING → CONFIRMED → COMPLETED / CANCELLED
+// - Slot lock 5 phút bằng Redis TTL (xử lý ở application layer)
+// - OWNER phải được ADMIN duyệt (VenueOwner.status = APPROVED)
+// - Chủ sân chỉ CANCEL trước 24h
+// - Refund: 100% trước 12h, 50% trước 6h, 0% trong 6h cuối
+// - STAFF role is venue-scoped (VenueStaff), not system-wide
+// ============================================================
+// v1.3 Changes:
+// - Added StaffPermission enum
+// - Added VenueStaff model (venue-scoped staff roles)
+// - Added staff relations to User and Venue
+// ============================================================
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum UserRole {
+  PLAYER
+  OWNER
+  ADMIN
+}
+
+enum VenueOwnerStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum SportType {
+  FOOTBALL
+  BADMINTON
+  TENNIS
+  BASKETBALL
+  VOLLEYBALL
+  TABLE_TENNIS
+  PICKLEBALL
+}
+
+enum FieldSize {
+  FIELD_5
+  FIELD_7
+  FIELD_11
+  OTHER
+}
+
+enum SlotStatus {
+  AVAILABLE
+  LOCKED // Redis TTL 5 phút quản lý auto-release
+  BOOKED
+}
+
+enum BookingStatus {
+  PENDING // Chờ thanh toán / confirm
+  CONFIRMED // Đã thanh toán + slot locked
+  COMPLETED // Hoàn thành trận đấu
+  CANCELLED // Đã hủy
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  REFUNDED_FULL
+  REFUNDED_HALF
+  FAILED
+}
+
+enum PaymentMethod {
+  MOMO
+  VNPAY
+  BANK_TRANSFER
+  CASH
+}
+
+enum PaymentProvider {
+  MOMO
+  VNPAY
+  MOMO_MANUAL
+}
+
+enum PaymentAttemptStatus {
+  PENDING
+  PROCESSING
+  PAID
+  FAILED
+  EXPIRED
+  CANCELLED
+  REQUIRES_RECONCILIATION
+}
+
+enum PaymentWebhookProcessingStatus {
+  RECEIVED
+  PROCESSED
+  DUPLICATE
+  IGNORED
+  INVALID_SIGNATURE
+  AMOUNT_MISMATCH
+  FAILED
+}
+
+enum StaffPermission {
+  MANAGE_BOOKINGS // Xem + confirm + cancel booking
+  CREATE_WALK_IN // Tạo booking offline (khách vãng lai)
+  PROCESS_PAYMENT // Check-in + thu tiền, update payment status
+  VIEW_SHIFT_REVENUE // Xem doanh thu trong ca (để đối soát)
+}
+
+// ============================================================
+// MODELS
+// ============================================================
+
+model User {
+  id        String   @id @default(uuid())
+  clerkId   String?  @unique @map("clerk_id")
+  email     String   @unique
+  fullName  String   @map("full_name")
+  phone     String?
+  avatarUrl String?  @map("avatar_url")
+  role      UserRole @default(PLAYER)
+  isActive  Boolean  @default(true) @map("is_active")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  ownerships    VenueOwner[]
+  bookings      Booking[]
+  payments      Payment[]
+  reviews       Review[]
+  staffAt       VenueStaff[]  @relation()
+  invitedStaff  VenueStaff[]  @relation("StaffInviter")
+
+  @@map("users")
+}
+
+model Venue {
+  id          String    @id @default(uuid())
+  name        String
+  description String?
+  address     String
+  district    String
+  city        String
+  latitude    Float?
+  longitude   Float?
+  images       String[]
+  amenities    String[]
+  pricePerHour Decimal?  @map("price_per_hour") @db.Decimal(12, 0)
+  isActive     Boolean   @default(false) @map("is_active") // ADMIN duyệt sân
+  rating      Float     @default(0.0)
+  avgRating   Decimal?  @default(0) @map("avg_rating") @db.Decimal(3, 2)
+  reviewCount Int       @default(0) @map("review_count")
+  version     Int       @default(1)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+  deletedAt   DateTime? @map("deleted_at")
+
+  owners   VenueOwner[]
+  fields   Field[]
+  bookings Booking[]
+  reviews  Review[]
+  staff    VenueStaff[]
+
+  @@index([city, district])
+  @@index([isActive])
+  @@map("venues")
+}
+
+model Field {
+  id        String    @id @default(uuid())
+  venueId   String    @map("venue_id")
+  name      String // "Sân 1", "Sân 5A", "Court A"
+  sportType SportType @map("sport_type")
+  size      FieldSize @default(FIELD_7)
+  isActive  Boolean   @default(true) @map("is_active")
+  version   Int       @default(1)
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  venue Venue       @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  slots VenueSlot[]
+
+  @@index([venueId])
+  @@index([sportType])
+  @@map("fields")
+}
+
+model VenueOwner {
+  id        String           @id @default(uuid())
+  userId    String           @map("user_id")
+  venueId   String           @map("venue_id")
+  status    VenueOwnerStatus @default(PENDING)
+  createdAt DateTime         @default(now()) @map("created_at")
+  updatedAt DateTime         @updatedAt @map("updated_at")
+
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  venue Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, venueId])
+  @@index([status])
+  @@map("venue_owners")
+}
+
+model VenueSlot {
+  id           String     @id @default(uuid())
+  fieldId      String     @map("field_id")
+  date         DateTime   @db.Date
+  startTime    DateTime   @map("start_time") @db.Time(0)
+  endTime      DateTime   @map("end_time") @db.Time(0)
+  pricePerSlot Decimal    @map("price_per_slot") // changed to Decimal
+  status       SlotStatus @default(AVAILABLE)
+  version      Int        @default(1)
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+
+  field        Field         @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+  bookingSlots BookingSlot[]
+
+  @@index([fieldId, date])
+  @@index([fieldId, date, startTime])
+  @@index([fieldId, date, status])
+  @@index([status])
+  @@unique([fieldId, date, startTime, endTime])
+  @@map("venue_slots")
+}
+
+model Booking {
+  id           String        @id @default(uuid())
+  userId       String        @map("user_id")
+  venueId      String        @map("venue_id")
+  status       BookingStatus @default(PENDING)
+  totalPrice   Decimal       @map("total_price") // changed to Decimal
+  note         String?
+  cancelReason String?       @map("cancel_reason")
+  refundAmount Decimal?      @map("refund_amount")
+  cancelledAt  DateTime?     @map("cancelled_at")
+  cancelledBy  String?       @map("cancelled_by")
+  confirmedAt  DateTime?     @map("confirmed_at")
+  expiresAt    DateTime?     @map("expires_at")
+  version      Int           @default(1)
+  createdAt    DateTime      @default(now()) @map("created_at")
+  updatedAt    DateTime      @updatedAt @map("updated_at")
+
+  user         User          @relation(fields: [userId], references: [id])
+  venue        Venue         @relation(fields: [venueId], references: [id])
+  bookingSlots BookingSlot[]
+  payment      Payment?
+  reviews      Review[]
+
+  @@index([userId, status])
+  @@index([venueId, status])
+  @@index([createdAt])
+  @@map("bookings")
+}
+
+model BookingSlot {
+  id          String @id @default(uuid())
+  bookingId   String @map("booking_id")
+  venueSlotId String @map("venue_slot_id")
+
+  booking   Booking   @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  venueSlot VenueSlot @relation(fields: [venueSlotId], references: [id])
+
+  @@unique([bookingId, venueSlotId])
+  @@index([venueSlotId])
+  @@map("booking_slots")
+}
+
+model Payment {
+  id             String           @id @default(uuid())
+  bookingId      String           @unique @map("booking_id")
+  userId         String           @map("user_id")
+  amount         Decimal          @map("amount")
+  currency       String           @default("VND")
+  method         PaymentMethod
+  status         PaymentStatus    @default(PENDING)
+  provider       PaymentProvider?
+  transactionId  String?          @map("transaction_id")
+  refundAmount   Decimal?         @map("refund_amount")
+  refundedAt     DateTime?        @map("refunded_at")
+  paidAt         DateTime?        @map("paid_at")
+  failedAt       DateTime?        @map("failed_at")
+  expiresAt      DateTime?        @map("expires_at")
+  failureCode    String?          @map("failure_code")
+  failureMessage String?          @map("failure_message")
+  version        Int              @default(1)
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  booking  Booking          @relation(fields: [bookingId], references: [id])
+  user     User             @relation(fields: [userId], references: [id])
+  attempts PaymentAttempt[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([provider, status])
+  @@map("payments")
+}
+
+model PaymentAttempt {
+  id                    String               @id @default(uuid())
+  paymentId             String               @map("payment_id")
+  provider              PaymentProvider
+  status                PaymentAttemptStatus @default(PENDING)
+  amount                Decimal
+  currency              String               @default("VND")
+  idempotencyKey        String?              @map("idempotency_key")
+  providerOrderId       String               @unique @map("provider_order_id")
+  providerRequestId     String?              @unique @map("provider_request_id")
+  providerTransactionId String?              @map("provider_transaction_id")
+  paymentUrl            String?              @map("payment_url")
+  expiresAt             DateTime?            @map("expires_at")
+  paidAt                DateTime?            @map("paid_at")
+  failedAt              DateTime?            @map("failed_at")
+  failureCode           String?              @map("failure_code")
+  failureMessage        String?              @map("failure_message")
+  rawCreateResponse     Json?                @map("raw_create_response")
+  createdAt             DateTime             @default(now()) @map("created_at")
+  updatedAt             DateTime             @updatedAt @map("updated_at")
+
+  payment       Payment               @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  webhookEvents PaymentWebhookEvent[]
+
+  @@index([paymentId, status])
+  @@index([provider, providerTransactionId])
+  @@index([expiresAt])
+  @@map("payment_attempts")
+}
+
+model PaymentWebhookEvent {
+  id                    String                         @id @default(uuid())
+  attemptId             String?                        @map("attempt_id")
+  provider              PaymentProvider
+  providerOrderId       String?                        @map("provider_order_id")
+  providerTransactionId String?                        @map("provider_transaction_id")
+  providerEventId       String?                        @map("provider_event_id")
+  payloadHash           String                         @unique @map("payload_hash")
+  signatureVerified     Boolean                        @default(false) @map("signature_verified")
+  processingStatus      PaymentWebhookProcessingStatus @default(RECEIVED) @map("processing_status")
+  rawPayload            Json                           @map("raw_payload")
+  receivedAt            DateTime                       @default(now()) @map("received_at")
+  processedAt           DateTime?                      @map("processed_at")
+
+  attempt PaymentAttempt? @relation(fields: [attemptId], references: [id])
+
+  @@index([provider, providerOrderId])
+  @@index([provider, providerTransactionId])
+  @@index([processingStatus])
+  @@map("payment_webhook_events")
+}
+
+model Review {
+  id        String   @id @default(cuid())
+  venueId   String   @map("venue_id")
+  userId    String   @map("user_id")
+  bookingId String?  @map("booking_id")
+  rating    Int      @default(5) // 1-5
+  comment   String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user    User     @relation(fields: [userId], references: [id])
+  venue   Venue    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  booking Booking? @relation(fields: [bookingId], references: [id])
+
+  @@index([venueId])
+  @@index([userId])
+  @@index([bookingId])
+  @@map("reviews")
+}
+
+model VenueStaff {
+  id          String            @id @default(uuid())
+  venueId     String            @map("venue_id")
+  userId      String            @map("user_id")
+  permissions StaffPermission[] // Postgres array enum
+  isActive    Boolean           @default(true) @map("is_active")
+  invitedBy   String            @map("invited_by") // userId của OWNER
+  createdAt   DateTime          @default(now()) @map("created_at")
+  updatedAt   DateTime          @updatedAt @map("updated_at")
+
+  venue   Venue @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  user    User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  inviter User  @relation("StaffInviter", fields: [invitedBy], references: [id])
+
+  @@unique([venueId, userId])
+  @@index([venueId])
+  @@index([userId])
+  @@map("venue_staff")
+}

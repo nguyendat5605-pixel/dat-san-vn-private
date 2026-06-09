@@ -1,0 +1,30 @@
+import { PrismaClient } from '@prisma/client';
+import * as dotenv from 'dotenv';
+import { join } from 'path';
+
+dotenv.config({ path: join(process.cwd(), '.env') });
+
+const prisma = new PrismaClient();
+
+async function main() {
+  try {
+    const users = await prisma.user.findMany({
+      select: {
+        email: true,
+        fullName: true,
+        role: true,
+      },
+    });
+
+    console.log('--- USERS IN DATABASE ---');
+    console.table(users);
+  } catch (error) {
+    console.error('Error fetching users:', error);
+  }
+}
+
+main()
+  .catch(console.error)
+  .finally(async () => {
+    await prisma.$disconnect();
+  });

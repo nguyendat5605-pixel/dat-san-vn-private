@@ -1,0 +1,10 @@
+FROM node:20-alpine
+RUN corepack enable pnpm
+WORKDIR /app
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json ./
+COPY apps/api/package.json ./apps/api/
+COPY packages/ ./packages/
+RUN pnpm install --frozen-lockfile
+COPY apps/api/prisma ./apps/api/prisma
+RUN pnpm --filter api exec prisma generate
+EXPOSE 3001

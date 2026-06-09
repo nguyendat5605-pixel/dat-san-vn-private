@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="DatSanVN maskable app icon">
+  <rect width="512" height="512" fill="#11502a"/>
+  <circle cx="256" cy="256" r="176" fill="#f8f5ef" opacity="0.12"/>
+  <path d="M142 326c36-70 77-116 124-138 39-19 82-22 126-9" fill="none" stroke="#f59e0b" stroke-width="40" stroke-linecap="round"/>
+  <path d="M126 364h260c25 0 46-21 46-46v-84c0-25-21-46-46-46H126v176Z" fill="#f8f5ef"/>
+  <path d="M178 254h62m-62 54h112" stroke="#11502a" stroke-width="26" stroke-linecap="round"/>
+  <circle cx="366" cy="280" r="38" fill="#11502a"/>
+  <path d="M352 260l30 20-30 20v-40Z" fill="#f8f5ef"/>
+</svg>
